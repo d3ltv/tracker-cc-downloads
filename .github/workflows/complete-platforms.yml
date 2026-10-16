@@ -1,0 +1,65 @@
+name: Build native installers from published package
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published application version
+        required: true
+        default: '1.18.5'
+      mac_zip_sha256:
+        description: SHA-256 of the published Mac arm64 ZIP
+        required: true
+        default: ae78e955dc788b0b7b67cafbf704bc41a28b688e53a5be115a6dd3f6686e7714
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mac-x64
+            os: macos-15-intel
+            platform: mac
+          - target: win-x64
+            os: windows-latest
+            platform: win
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      RELEASE_VERSION: ${{ inputs.version }}
+      PAYLOAD_SHA256: ${{ inputs.mac_zip_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Build and launch native application
+        run: node tools/repackage.cjs ${{ matrix.platform }} x64
+      - name: Install actual Windows EXE and launch installed application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter '*-win-x64.exe' | Select-Object -First 1
+          $destination = Join-Path $env:RUNNER_TEMP 'TrackerInstalled'
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$destination" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "NSIS failed: $($process.ExitCode)" }
+          node tools/smoke.cjs (Join-Path $destination 'Tracker C.C.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record validated installer metadata
+        run: node tools/manifest.cjs ${{ matrix.platform }} x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.target }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/manifest-*.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
